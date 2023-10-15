@@ -13,7 +13,7 @@ def get_hog_feature(image):
     :param image: image
     :return: hog feature of image
     """
-    gray = cv2.resize(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), (64, 128))
+    gray = cv2.resize(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), (128, 128))
     hist = hog(gray, cells_per_block=(2, 2), block_norm='L2-Hys', transform_sqrt=True)
     return hist
 
@@ -64,7 +64,8 @@ def get_sift_feature(images, cluster_k):
 
     descs = descriptors[0]
     for desc in descriptors[1:]:
-        descs = np.vstack((descs, desc))
+        if desc is not None:
+            descs = np.vstack((descs, desc))
     print("Clustering data..")
     cluster.fit(descs.astype(float))
     print("Clustered " + str(len(cluster.cluster_centers_)) + " centroids")

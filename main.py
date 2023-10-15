@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # import the necessary packages
 import sys
+
+import cv2
 from skimage.feature import hog
 from sklearn.model_selection import KFold, cross_val_score
 
@@ -46,7 +48,6 @@ def hog(images):
     """
     data = []
     for image in images:
-        # 得到 image 的特征
         data.append(extractor.get_hog_feature(image))
     return data
 
@@ -54,6 +55,7 @@ def hog(images):
 def sift(images, k):
     """
     Helper function to get sift features of images
+    :param k:
     :param images: image list
     :return: sift features of images
     """
