@@ -186,7 +186,7 @@ def main():
     # Define the loss function with Classification Cross-Entropy loss and an optimizer with Adam optimizer
     loss_fn = nn.CrossEntropyLoss()
     optimizer = Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
-    train(model, optimizer, loss_fn, train_loader, test_loader, 50)
+    train(model, optimizer, loss_fn, train_loader, test_loader, 5)
     """# 逐个样本遍历数据集并打印前几个样本
     num_samples_to_print = 10
     for i in range(num_samples_to_print):
