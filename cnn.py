@@ -1,58 +1,96 @@
+import os
 import torch
+import json
+from PIL import Image
 import torch.nn as nn
+from torch.optim import Adam
+from torchvision.transforms import transforms
+from torch.utils.data import Dataset, DataLoader
+from torch.autograd import Variable
+
+"""import cv2
+import numpy as np
 import torchvision
 import torch.nn.functional as F
-from torch.optim import Adam
-from torch.autograd import Variable
-import matplotlib.pyplot as plt
-import numpy as np
+import matplotlib.pyplot as plt"""
 
 
-# Function to show the images
-def imageshow(img):
-    img = img / 2 + 0.5  # unnormalize
-    npimg = img.numpy()
-    plt.imshow(np.transpose(npimg, (1, 2, 0)))
-    plt.show()
+def default_loader(path):
+    return Image.open(path).resize((224, 224)).convert('RGB')
 
 
-# Function to test the model with a batch of images and show the labels predictions
-def testBatch():
-    # get batch of images from the test DataLoader
-    images, labels = next(iter(test_loader))
+# 准备数据
+class TrashSortDataset(Dataset):
+    def __init__(self, data_dir, transform=None, loader=default_loader):
+        super(TrashSortDataset, self).__init__()
+        self.data_dir = data_dir
+        self.transform = transform
+        self.loader = loader
+        # 打开文件以读取文本内容
+        with open(data_dir, 'r') as file:
+            content = file.read()
+        self.data_files = json.loads(content)
 
-    # show all images as one image grid
-    imageshow(torchvision.utils.make_grid(images))
+    def __len__(self):
+        # Return the total number of samples in the dataset
+        return len(self.data_files)
 
-    # Show the real labels on the screen
-    print('Real labels: ', ' '.join('%5s' % classes[labels[j]]
-                                    for j in range(batch_size)))
-
-    # Let's see what if the model identifiers the  labels of those example
-    outputs = model(images)
-
-    # We got the probability for every 10 labels. The highest (max) probability should be correct label
-    _, predicted = torch.max(outputs, 1)
-
-    # Let's show the predicted labels on the screen to compare with the real ones
-    print('Predicted: ', ' '.join('%5s' % classes[predicted[j]]
-                                  for j in range(batch_size)))
+    def __getitem__(self, index):
+        # Load and return a sample at the given index
+        image_path = os.path.join(".\\data\\RubbishClassification", self.data_files[index]["dir"])
+        label = self.data_files[index]["label"]
+        # label = torch.LongTensor([int(self.data_files[index]["label"])])
+        image = self.loader(image_path)
+        if self.transform is not None:
+            image = self.transform(image)
+            image = image.float()
+        return image, torch.tensor(int(label))
 
 
+# 搭建神经网络结构
+class CNN(nn.Module):
+    def __init__(self, num_classes: int = 16, dropout: float = 0.5) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+            nn.Conv2d(64, 192, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+            nn.Conv2d(192, 384, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((6, 6))
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(256 * 6 * 6, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
 
 
-
-
-
-
-# Function to save the model
-def saveModel():
-    path = "./myFirstModel.pth"
+def saveModel(model):
+    path = "./trashSortModel.pth"
     torch.save(model.state_dict(), path)
 
 
-# Function to test the model with the test dataset and print the accuracy for the test images
-def testAccuracy():
+def testAccuracy(model, test_loader):
     model.eval()
     accuracy = 0.0
     total = 0.0
@@ -72,8 +110,7 @@ def testAccuracy():
     return (accuracy)
 
 
-# Training function. We simply have to loop over our data iterator and feed the inputs to the network and optimize.
-def train(num_epochs):
+def train(model, optimizer, loss_fn, train_loader, test_loader, num_epochs):
     best_accuracy = 0.0
 
     # Define your execution device
@@ -84,13 +121,12 @@ def train(num_epochs):
 
     for epoch in range(num_epochs):  # loop over the dataset multiple times
         running_loss = 0.0
-        running_acc = 0.0
 
         for i, (images, labels) in enumerate(train_loader, 0):
 
             # get the inputs
-            images = Variable(images.to(device))
-            labels = Variable(labels.to(device))
+            images = images.to(device)
+            labels = labels.to(device)
 
             # zero the parameter gradients
             optimizer.zero_grad()
@@ -113,71 +149,54 @@ def train(num_epochs):
                 running_loss = 0.0
 
         # Compute and print the average accuracy fo this epoch when tested over all 10000 test images
-        accuracy = testAccuracy()
+        accuracy = testAccuracy(model, test_loader)
         print('For epoch', epoch + 1, 'the test accuracy over the whole test set is %d %%' % (accuracy))
 
         # we want to save the model if the accuracy is the best
         if accuracy > best_accuracy:
-            saveModel()
+            saveModel(model)
             best_accuracy = accuracy
 
 
+def main():
+    train_dir = "./data/RubbishClassification/train_.json"
+    test_dir = "./data/RubbishClassification/val_.json"
+    # get_image(train_dir)
+    transformations = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+    train_set = TrashSortDataset(train_dir, transform=transformations)
+    train_loader = DataLoader(train_set, batch_size=16, shuffle=True, num_workers=0)
+    test_set = TrashSortDataset(test_dir, transform=transformations)
+    test_loader = DataLoader(test_set, batch_size=16, shuffle=False, num_workers=0)
+    # 打印数据集的长度（总样本数）
+    print("Total samples in the dataset:", len(train_set))
+    # Instantiate a neural network model
+    model = CNN()
 
+    """# 得到一个迭代器
+    data_iterator = iter(train_loader)
+    # 从迭代器中获取第一个批次的数据
+    images, labels = next(data_iterator)
+    # 现在，您可以查看第一个批次的图像和标签
+    print("Batch of images shape:", images.shape)
+    print("Batch of labels:", labels)"""
 
-
-
-
-
-
-# Define a convolution neural network
-class Network(nn.Module):
-    def __init__(self):
-        super(Network, self).__init__()
-
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=12, kernel_size=5, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(12)
-        self.conv2 = nn.Conv2d(in_channels=12, out_channels=12, kernel_size=5, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm2d(12)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv4 = nn.Conv2d(in_channels=12, out_channels=24, kernel_size=5, stride=1, padding=1)
-        self.bn4 = nn.BatchNorm2d(24)
-        self.conv5 = nn.Conv2d(in_channels=24, out_channels=24, kernel_size=5, stride=1, padding=1)
-        self.bn5 = nn.BatchNorm2d(24)
-        self.fc1 = nn.Linear(24 * 10 * 10, 10)
-
-    def forward(self, input):
-        output = F.relu(self.bn1(self.conv1(input)))
-        output = F.relu(self.bn2(self.conv2(output)))
-        output = self.pool(output)
-        output = F.relu(self.bn4(self.conv4(output)))
-        output = F.relu(self.bn5(self.conv5(output)))
-        output = output.view(-1, 24 * 10 * 10)
-        output = self.fc1(output)
-
-        return output
+    # Define the loss function with Classification Cross-Entropy loss and an optimizer with Adam optimizer
+    loss_fn = nn.CrossEntropyLoss()
+    optimizer = Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
+    train(model, optimizer, loss_fn, train_loader, test_loader, 50)
+    """# 逐个样本遍历数据集并打印前几个样本
+    num_samples_to_print = 10
+    for i in range(num_samples_to_print):
+        image, label = train_data[i]
+        print(f"Sample {i + 1} - Label: {label}")
+        # 如果您需要显示图像，可以使用以下代码
+        cv2.imshow("Image", image.permute(1, 2, 0).numpy())
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()"""
 
 
 if __name__ == "__main__":
-    # Let's build our model
-    train(5)
-    print('Finished Training')
-
-    # Test which classes performed well
-    testModelAccuracy()
-
-    # Let's load the model we just created and test the accuracy per label
-    model = Network()
-    path = "myFirstModel.pth"
-    model.load_state_dict(torch.load(path))
-
-    # Test with batch of images
-    testBatch()
-
-
-
-# Instantiate a neural network model
-model = Network()
-
-# Define the loss function with Classification Cross-Entropy loss and an optimizer with Adam optimizer
-loss_fn = nn.CrossEntropyLoss()
-optimizer = Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
+    main()

@@ -186,6 +186,26 @@ def testBatch():
                                   for j in range(batch_size)))
 
 
+# Function to test what classes performed well
+def testClassess():
+    class_correct = list(0. for i in range(number_of_labels))
+    class_total = list(0. for i in range(number_of_labels))
+    with torch.no_grad():
+        for data in test_loader:
+            images, labels = data
+            outputs = model(images)
+            _, predicted = torch.max(outputs, 1)
+            c = (predicted == labels).squeeze()
+            for i in range(batch_size):
+                label = labels[i]
+                class_correct[label] += c[i].item()
+                class_total[label] += 1
+
+    for i in range(number_of_labels):
+        print('Accuracy of %5s : %2d %%' % (
+            classes[i], 100 * class_correct[i] / class_total[i]))
+
+
 if __name__ == "__main__":
     # Let's build our model
     train(5)
@@ -196,5 +216,6 @@ if __name__ == "__main__":
     path = "myFirstModel.pth"
     model.load_state_dict(torch.load(path))
 
-    # Test with batch of images
+    """# Test with batch of images
     testBatch()
+    testClassess()"""
