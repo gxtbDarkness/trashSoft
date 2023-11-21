@@ -1,18 +1,27 @@
-import os
+import argparse
+import os.path
+import sys
+
+from torchvision import models
 import torch
 import json
 from PIL import Image
 import torch.nn as nn
 from torch.optim import Adam
+import matplotlib.pyplot as plt
 from torchvision.transforms import transforms
 from torch.utils.data import Dataset, DataLoader
-from torch.autograd import Variable
 
-"""import cv2
-import numpy as np
-import torchvision
-import torch.nn.functional as F
-import matplotlib.pyplot as plt"""
+
+def strbool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
 def default_loader(path):
@@ -37,9 +46,11 @@ class TrashSortDataset(Dataset):
 
     def __getitem__(self, index):
         # Load and return a sample at the given index
-        image_path = os.path.join(".\\data\\RubbishClassification", self.data_files[index]["dir"])
+        if os.path.exists(self.data_files[index]["dir"]):
+            image_path = self.data_files[index]["dir"]
+        else:
+            image_path = os.path.join(".\\data\\RubbishClassification\\", self.data_files[index]["dir"])
         label = self.data_files[index]["label"]
-        # label = torch.LongTensor([int(self.data_files[index]["label"])])
         image = self.loader(image_path)
         if self.transform is not None:
             image = self.transform(image)
@@ -47,155 +58,196 @@ class TrashSortDataset(Dataset):
         return image, torch.tensor(int(label))
 
 
-# 搭建神经网络结构
-class CNN(nn.Module):
-    def __init__(self, num_classes: int = 16, dropout: float = 0.5) -> None:
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(64, 192, kernel_size=5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(192, 384, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(384, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-        )
-        self.avgpool = nn.AdaptiveAvgPool2d((6, 6))
-        self.classifier = nn.Sequential(
-            nn.Dropout(p=dropout),
-            nn.Linear(256 * 6 * 6, 4096),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout),
-            nn.Linear(4096, 4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, num_classes),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.classifier(x)
-        return x
-
-
 def saveModel(model):
-    path = "./trashSortModel.pth"
+    path = "./result/deeplearning/trashSortModel.pth"
     torch.save(model.state_dict(), path)
 
 
-def testAccuracy(model, test_loader):
+def valAccuracy(model, device, val_loader, loss_fn, val_loss):
     model.eval()
     accuracy = 0.0
+    running_loss = 0.0
     total = 0.0
 
     with torch.no_grad():
-        for data in test_loader:
+        for data in val_loader:
             images, labels = data
-            # run the model on the test set to predict labels
+            images = images.to(device)
+            labels = labels.to(device)
             outputs = model(images)
-            # the label with the highest energy will be our prediction
+            loss = loss_fn(outputs, labels)
+            running_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             accuracy += (predicted == labels).sum().item()
 
-    # compute the accuracy over all test images
+    # compute the accuracy over all val images
+    val_loss.append(running_loss / 1000.0)
     accuracy = (100 * accuracy / total)
-    return (accuracy)
+    return accuracy
 
 
-def train(model, optimizer, loss_fn, train_loader, test_loader, num_epochs):
+def calculate_label_accuracies(model, device, val_loader, num_classes):
+    model.eval()
+    label_correct = {i: 0 for i in range(num_classes)}
+    label_total = {i: 0 for i in range(num_classes)}
+
+    with torch.no_grad():
+        for data in val_loader:
+            images, labels = data
+            images = images.to(device)
+            labels = labels.to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+
+            for i in range(num_classes):
+                label_total[i] += (labels == i).sum().item()
+                label_correct[i] += ((predicted == labels) & (labels == i)).sum().item()
+
+    label_accuracies = {i: label_correct[i] / label_total[i] if label_total[i] > 0 else 0.0 for i in range(num_classes)}
+    with open('./result/deeplearning/classes_accuracy.json', 'a') as f:
+        json.dump(label_accuracies, f)
+        f.write('\n')
+    return label_accuracies
+
+
+def train(model, device, optimizer, loss_fn, train_loader, val_loader, num_epochs, classes_num):
     best_accuracy = 0.0
+    train_loss = []
+    val_loss = []
 
-    # Define your execution device
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print("The model will be running on", device, "device")
-    # Convert model parameters and buffers to CPU or Cuda
-    model.to(device)
-
-    for epoch in range(num_epochs):  # loop over the dataset multiple times
+    for epoch in range(num_epochs):
         running_loss = 0.0
 
         for i, (images, labels) in enumerate(train_loader, 0):
-
-            # get the inputs
+            # 获取输入
             images = images.to(device)
             labels = labels.to(device)
 
-            # zero the parameter gradients
+            # 梯度归0
             optimizer.zero_grad()
-            # predict classes using images from the training set
+            # 预测训练集中图像所属的类
             outputs = model(images)
-            # compute the loss based on model output and real labels
+            # 基于输出与标签计算损失
             loss = loss_fn(outputs, labels)
-            # backpropagate the loss
+            # 反向传播
             loss.backward()
-            # adjust parameters based on the calculated gradients
+            # 基于计算出的梯度调整参数
             optimizer.step()
 
-            # Let's print statistics for every 1,000 images
             running_loss += loss.item()  # extract the loss value
-            if i % 1000 == 999:
-                # print every 1000 (twice per epoch)
-                print('[%d, %5d] loss: %.3f' %
-                      (epoch + 1, i + 1, running_loss / 1000))
-                # zero the loss
-                running_loss = 0.0
 
-        # Compute and print the average accuracy fo this epoch when tested over all 10000 test images
-        accuracy = testAccuracy(model, test_loader)
-        print('For epoch', epoch + 1, 'the test accuracy over the whole test set is %d %%' % (accuracy))
+        train_loss.append(running_loss / 1000.0)
+        calculate_label_accuracies(model, device, val_loader, classes_num)
+        accuracy = valAccuracy(model, device, val_loader, loss_fn, val_loss)
+        print('For epoch', epoch + 1, 'the val accuracy over the whole val set is %d %%' % (accuracy))
 
-        # we want to save the model if the accuracy is the best
+        # 保存准确率最高的模型
         if accuracy > best_accuracy:
             saveModel(model)
             best_accuracy = accuracy
 
+    with open('./result/deeplearning/loss.json', 'a') as f:
+        json.dump({"train_loss": train_loss}, f)
+        f.write('\n')
+        json.dump({"val_loss": val_loss}, f)
+        f.write('\n\n')
+    return train_loss, val_loss
+
+
+def show_loss(train_loss, val_loss, epoch):
+    epochs = list(range(1, epoch + 1))
+    # 绘制训练集损失曲线
+    plt.plot(epochs, train_loss, label='Train Loss', marker='o')
+    # 绘制验证集损失曲线
+    plt.plot(epochs, val_loss, label='Validation Loss', marker='o')
+    # 添加标签和标题
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    # 添加图例
+    plt.legend()
+    plt.savefig('loss_chart.png', format='png')
+    # 显示图形
+    plt.show()
+
+
+def clear():
+    with open('./result/deeplearning/classes_accuracy.json', 'w') as f:
+        json.dump({}, f)
+
+    with open('./result/deeplearning/loss.json', 'w') as f:
+        json.dump({}, f)
+
 
 def main():
-    train_dir = "./data/RubbishClassification/train_.json"
-    test_dir = "./data/RubbishClassification/val_.json"
-    # get_image(train_dir)
+    # 命令行设置
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model", help="Model to use. Available: AlexNet, ResNet")
+    parser.add_argument('-pretrained', '--pre', type=strbool, nargs='?', const=True, default=True,
+                        help='Set True for Pretrain')
+    parser.add_argument('-extensive_dataset', '--d', type=strbool, default=False, help='Decide if choose the extensive '
+                                                                                       'dataset')
+    parser.add_argument('-batch_size', '--b', type=int, help='batch_size eg. 64, 32, 16, 8', default=32)
+    parser.add_argument('-learning_rate', '--lr', type=float, help='set the learning rate', default=0.0001)
+    parser.add_argument('-epochs', '--ep', type=int, help='set the epochs', default=100)
+    parser.add_argument('-classes_num', '--cla', type=int, help='set number of classes', default=16)
+    args = parser.parse_args()
+
+    # 检查是否选择模型
+    if not args.model:
+        parser.print_help()
+        sys.exit()
+
+    # 选择数据集
+    if not args.d:
+        train_dir = "./data/RubbishClassification/train_.json"
+        val_dir = "./data/RubbishClassification/val_.json"
+    else:
+        train_dir = "./data/expand_data/train_.json"
+        val_dir = "./data/expand_data/val_.json"
+
+    # 加载数据集与测试集
     transformations = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
     train_set = TrashSortDataset(train_dir, transform=transformations)
-    train_loader = DataLoader(train_set, batch_size=16, shuffle=True, num_workers=0)
-    test_set = TrashSortDataset(test_dir, transform=transformations)
-    test_loader = DataLoader(test_set, batch_size=16, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_set, batch_size=args.b, shuffle=True, num_workers=0)
+    val_set = TrashSortDataset(val_dir, transform=transformations)
+    val_loader = DataLoader(val_set, batch_size=args.b, shuffle=False, num_workers=0)
+
     # 打印数据集的长度（总样本数）
     print("Total samples in the dataset:", len(train_set))
-    # Instantiate a neural network model
-    model = CNN()
 
-    """# 得到一个迭代器
-    data_iterator = iter(train_loader)
-    # 从迭代器中获取第一个批次的数据
-    images, labels = next(data_iterator)
-    # 现在，您可以查看第一个批次的图像和标签
-    print("Batch of images shape:", images.shape)
-    print("Batch of labels:", labels)"""
+    # 初始化神经网络模型
+    if args.model.lower() == 'alexnet':
+        model = models.alexnet(pretrained=args.pre)
+    elif args.model.lower() == 'resnet':
+        model = models.resnet50(pretrained=args.pre)
+        fc_inputs = model.fc.in_features
+        model.fc = nn.Linear(fc_inputs, args.cla)
+    else:
+        parser.print_help()
+        sys.exit()
 
-    # Define the loss function with Classification Cross-Entropy loss and an optimizer with Adam optimizer
+    # 清空json文件中的内容
+    clear()
+
+    # 使用GPU运行
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    print("The model will be running on", device, "device")
+
+    # 定义损失函数与优化器
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
-    train(model, optimizer, loss_fn, train_loader, test_loader, 5)
-    """# 逐个样本遍历数据集并打印前几个样本
-    num_samples_to_print = 10
-    for i in range(num_samples_to_print):
-        image, label = train_data[i]
-        print(f"Sample {i + 1} - Label: {label}")
-        # 如果您需要显示图像，可以使用以下代码
-        cv2.imshow("Image", image.permute(1, 2, 0).numpy())
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()"""
+    optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=0.0001)
+
+    # 训练模型并获取训练集与测试集损失
+    train_loss, val_loss = train(model, device, optimizer, loss_fn, train_loader, val_loader, args.ep, args.cla)
+
+    # 绘图
+    show_loss(train_loss, val_loss, args.ep)
 
 
 if __name__ == "__main__":
